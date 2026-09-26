@@ -126,6 +126,22 @@ RUN set -eux; \
 WORKDIR /workspace
 COPY . .
 
+# build.sh only installs torch when an index is configured for it:
+#
+#   install_torch_from_mirror() {
+#     [[ -n "$BUILD_TORCH_INDEX" ]] || return 0   # <- returns without doing anything
+#
+# and its network preflight populates that variable only on the *domestic*
+# package route. On the official route the venv is left without torch, and
+# vLLM's setup.py imports torch at module level, so the editable install fails
+# during metadata preparation with "ModuleNotFoundError: No module named
+# 'torch'". Setting it explicitly makes the step deterministic on every route.
+# The official PyTorch index carries the two pins build.sh asks for
+# (torch==<PRIMARY_TORCH_VERSION>+<cuda_backend> and triton==3.7.1); override
+# the ARG to use a nearer mirror.
+ARG BUILD_TORCH_INDEX=https://download.pytorch.org/whl/cu130/
+ENV BUILD_TORCH_INDEX=${BUILD_TORCH_INDEX}
+
 # build.sh waits for a confirmation prompt before it starts; there is no TTY
 # here. ALLOW_HOST_MISMATCH only relaxes the container-meaningless kernel check
 # — see the header — the other two anchors were re-asserted above.
