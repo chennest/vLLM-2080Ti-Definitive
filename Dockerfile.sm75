@@ -142,6 +142,24 @@ COPY . .
 ARG BUILD_TORCH_INDEX=https://download.pytorch.org/whl/cu130/
 ENV BUILD_TORCH_INDEX=${BUILD_TORCH_INDEX}
 
+# vLLM takes its version from the git tag the checkout sits on, and a tag that
+# setuptools-scm cannot parse is a hard error, not a fallback: pointing the
+# build at an image-release tag such as v0.2.2-docker1 ends with
+#
+#   ValueError: Can't parse version from tag 'v0.2.2-docker1'
+#   (tag_regex='^(?:[\w-]+-)?(?P<version>[vV]?\d+(?:\.\d+){0,2}[^\+]*)(?:\+.*)?$')
+#
+# raised from vcs_versioning/_scm_version.py meta(). Pin the version instead, so
+# the shape of the published tag is not load-bearing for whether the image
+# builds. The default is the project's own fallback_version from pyproject.toml
+# ([tool.setuptools_scm]) — the same value build.sh exports when it finds a
+# source snapshot without usable VCS metadata. Override the ARG to stamp a
+# different version (VLLM_VERSION_OVERRIDE is not used here because it would
+# only be honoured by setup.py, not by build.sh's own version exports).
+ARG VLLM_VERSION=0.2.2.post1+2080ti
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VLLM_VERSION} \
+    SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM=${VLLM_VERSION}
+
 # build.sh waits for a confirmation prompt before it starts; there is no TTY
 # here. ALLOW_HOST_MISMATCH only relaxes the container-meaningless kernel check
 # — see the header — the other two anchors were re-asserted above.
