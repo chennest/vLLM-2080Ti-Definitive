@@ -142,6 +142,24 @@ COPY . .
 ARG BUILD_TORCH_INDEX=https://download.pytorch.org/whl/cu130/
 ENV BUILD_TORCH_INDEX=${BUILD_TORCH_INDEX}
 
+# Building the FlashQLA SM75 extension does not need a device — nvcc plus an
+# explicit TORCH_CUDA_ARCH_LIST (build.sh and sm_legacy.py both default to 7.5)
+# are enough — but two things assume a driver is present:
+#   1. sm_legacy.py refuses to compile while torch.cuda.is_available() is false.
+#      FLASHQLA_LEGACY_ALLOW_NO_GPU_BUILD is the opt-in that lifts that check.
+#   2. torch's cpp_extension links CUDA extensions against libcuda, so the
+#      toolkit's stub library has to be reachable. The runtime stage is a
+#      separate FROM and never sees the stub, so the real driver remains the
+#      only libcuda there.
+RUN set -eux; \
+    echo /usr/local/lib > /etc/ld.so.conf.d/zz-ci-cuda-stubs.conf; \
+    ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/lib/libcuda.so.1; \
+    ldconfig; \
+    ldconfig -p | grep -q 'libcuda\.so\.1'
+
+ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs \
+    FLASHQLA_LEGACY_ALLOW_NO_GPU_BUILD=1
+
 # vLLM takes its version from the git tag the checkout sits on, and a tag that
 # setuptools-scm cannot parse is a hard error, not a fallback: pointing the
 # build at an image-release tag such as v0.2.2-docker1 ends with

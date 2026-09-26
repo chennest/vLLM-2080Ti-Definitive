@@ -31,6 +31,22 @@ def _debug_legacy_enabled() -> bool:
     return os.getenv("SGLANG_DEBUG_GDN_SM75", "").lower() in ("1", "true", "yes")
 
 
+def _no_gpu_build_enabled() -> bool:
+    """Allow compiling the SM75 extension on a host with no CUDA device.
+
+    Compiling this extension needs nvcc plus an explicit TORCH_CUDA_ARCH_LIST
+    (7.5, set below), not a device. Image builds run on GPU-less hosts, so an
+    explicit opt-in keeps the guard for real deployments while letting those
+    builds produce the sm_75 cubin. The resulting binary still needs a CUDA
+    runtime to load, so an unguarded deployment fails loudly either way.
+    """
+    return os.getenv("FLASHQLA_LEGACY_ALLOW_NO_GPU_BUILD", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 def _debug_sync(label: str, tensor: torch.Tensor | None = None) -> None:
     if not _debug_legacy_enabled() or not torch.cuda.is_available():
         return
@@ -82,7 +98,7 @@ def _load_ext():
     if _EXT is not None:
         return _EXT
 
-    if not torch.cuda.is_available():
+    if not torch.cuda.is_available() and not _no_gpu_build_enabled():
         raise RuntimeError("SM70/SM75 legacy GDN backend requires CUDA")
 
     os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "7.5")
