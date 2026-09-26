@@ -1,0 +1,117 @@
+# Build and publish the SM75 (Turing) vLLM image.
+#
+# Why this workflow exists
+# ------------------------
+# * The repository ships source-only releases. Reproducing the SM75 stack by
+#   hand needs a CUDA 13.3 devel toolchain, a glibc-patched CUDA header set, a
+#   Rust toolchain, a Python 3.12 venv, the FlashQLA SM70/SM75 kernels and a
+#   mirror-aware dependency fetch — a significant setup cost for every Turing
+#   user (T10 / T4 / 2080 Ti). A prebuilt image removes it.
+# * There was no CI in this repository, so nothing built or published the image
+#   Dockerfile.sm75 describes.
+#
+# Three details that must not be "simplified" away
+# -----------------------------------------------
+# 1. The image is built from Dockerfile.sm75, which drives build.sh — the
+#    project's supported build path. That is what fetches and compiles the
+#    FlashQLA SM70/SM75 legacy GDN kernels and what defaults TORCH_CUDA_ARCH_LIST
+#    to 7.5. Building docker/Dockerfile instead skips both.
+# 2. Free disk space is a required step, not an optimisation. GitHub-hosted
+#    runners expose roughly 14 GB; the CUDA devel base image plus the compile
+#    tree need 20-30 GB.
+# 3. The checkout must be full-depth with tags. build.sh derives the wheel
+#    version through setuptools-scm, and a shallow, tag-less clone leaves it
+#    with nothing to resolve.
+#
+# No buildx layer cache is configured on purpose: the image is far larger than
+# the 10 GB per-repository Actions cache, so a cache export cannot be stored
+# (it would fail or thrash the limit). Builds are therefore full rebuilds.
+#
+name: docker-publish
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      push_image:
+        description: Push the built image to the registry
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # The CUDA extension build is in the 30 min - 2 h range on a 4-core runner.
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history + tags: setuptools-scm resolves the wheel version from
+          # git, so a shallow clone would fall back to pyproject's
+          # fallback_version instead of the released tag.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Report resolved revision
+        run: |
+          echo "ref: ${GITHUB_REF}"
+          echo "commit: ${GITHUB_SHA}"
+          git describe --tags --always || true
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          # Keep swap: the runner has ~16 GB of RAM and the parallel C++/CUDA
+          # compile is memory-bound.
+          swap-storage: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ${{ env.REGISTRY }}
+        if: startsWith(github.ref, 'refs/tags/') || inputs.push_image
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=tag
+            type=sha,prefix=sha-
+
+      - name: Build (and push on tag)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Dedicated SM75 Dockerfile. Unlike docker/Dockerfile it drives
+          # build.sh, which fetches and compiles the FlashQLA SM70/SM75 legacy
+          # GDN kernels (required by Qwen3.8 on Turing) and pins
+          # TORCH_CUDA_ARCH_LIST to 7.5 by default, so only SM75 kernels are
+          # built.
+          file: Dockerfile.sm75
+          target: runtime
+          push: ${{ startsWith(github.ref, 'refs/tags/') || inputs.push_image }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

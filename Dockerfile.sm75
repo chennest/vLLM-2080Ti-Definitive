@@ -1,0 +1,189 @@
+# syntax=docker/dockerfile:1
+#
+# SM75 (Turing) vLLM image — Tesla T10 16GB / RTX 2080 Ti class hardware.
+#
+# Why a separate Dockerfile instead of docker/Dockerfile
+# ------------------------------------------------------
+# 1. Behaviour. docker/Dockerfile never invokes build.sh and contains no
+#    reference to FlashQLA at all, so the FlashQLA SM70/SM75 legacy GDN kernels
+#    — the ones Qwen3.8's Gated DeltaNet needs on Turing — are not compiled into
+#    it. build.sh is the project's supported source path: it fetches the
+#    FlashQLA backend, applies the SM75 patches, compiles the legacy extension
+#    and verifies the result.
+# 2. Cost. docker/Dockerfile compiles a wide architecture matrix (ARG default
+#    '7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0', and docker/docker-bake.hcl pins
+#    '8.0 8.9 9.0 10.0 11.0 12.0') plus extras a single-arch SM75 image does not
+#    need. build.sh defaults TORCH_CUDA_ARCH_LIST to 7.5, so the result carries
+#    SM75 kernels only.
+#
+# Base image (anchors come from PROJECT_RELEASE.env)
+# --------------------------------------------------
+#   PRIMARY_UBUNTU_VERSION="26.04+"  PRIMARY_GCC_MAJOR="15"  PRIMARY_CUDA_VERSION="13.0"
+#   -> nvidia/cuda:13.3.0-*-ubuntu26.04 satisfies the Ubuntu and GCC anchors
+#      (26.04 ships gcc 15.2 as /usr/bin/gcc) and nvcc major 13 matches the CUDA
+#      anchor.
+#   -> Ubuntu 26.04 ships glibc >= 2.41, which is why the bundled
+#      toolchain-patches/cuda-13.0-glibc-2.41-rsqrt.patch has to be applied.
+#   CAVEAT: CUDA 13.3 is newer than the author-validated 13.0. 13.x is ABI
+#   compatible within the major version, but this is not the validated combo.
+#
+# Host checks
+# -----------
+# build.sh validates nvcc / GCC / kernel against the release anchors and aborts
+# on mismatch (REQUIRE_PRIMARY_ENV defaults to 1). nvcc and GCC are re-asserted
+# below so a wrong base image fails in seconds. The third check cannot be
+# satisfied in any container — `uname -r` reports the *build host's* kernel,
+# which has nothing to do with the artifact — so ALLOW_HOST_MISMATCH=1 relaxes
+# that one, and the assertions put the other two back.
+#
+# Build
+# -----
+#   docker buildx build --target runtime -t vllm-2080ti-sm75:v0.2.2 .
+#
+# Run (weights are mounted, never baked in — Qwen3.8-27B-INT4 is ~20 GB)
+# ---------------------------------------------------------------------
+#   docker run --gpus all -v /path/to/models:/models \
+#     -e MODEL_DIR=/models/Qwen3.8-27B-INT4 \
+#     -e PROFILE=2xT10/qwen27b/w4a16/mtp3-fp8kv-1x262K-text-only.env \
+#     -e GPU_DEVICES=0,1 -e TP_SIZE=2 -e NON_INTERACTIVE=1 \
+#     -p 8000:8000 vllm-2080ti-sm75:v0.2.2
+
+# ─────────────────────────────── builder ───────────────────────────────
+FROM nvidia/cuda:13.3.0-devel-ubuntu26.04 AS builder
+
+# CUDA_HOME is not exported by the nvidia/cuda images, but build.sh needs it:
+# check_cuda_glibc_compatibility() reads $CUDA_HOME/targets/... and the FlashQLA
+# extension build derives CUDACXX from it. Without it both paths break.
+# UV_PYTHON_INSTALL_DIR keeps the uv-managed CPython 3.12 inside /workspace, so
+# the runtime stage's single COPY stays self-contained (the venv records that
+# interpreter's absolute path).
+ENV DEBIAN_FRONTEND=noninteractive \
+    CUDA_HOME=/usr/local/cuda \
+    UV_PYTHON_INSTALL_DIR=/workspace/.uv/python \
+    UV_HTTP_TIMEOUT=500 \
+    CARGO_HOME=/root/.cargo \
+    RUSTUP_HOME=/root/.rustup \
+    PATH=/usr/local/cuda/bin:/root/.cargo/bin:$PATH
+
+# build.sh deliberately installs nothing system-wide — it only *checks* that
+# nvcc / GCC / kernel match the release anchors. Everything else it needs (git,
+# curl, patch, cmake/ninja, a Python 3 to run its helpers) must be present.
+# apt's own directories are cache mounts, so nothing here lands in a layer.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      bash git curl ca-certificates patch \
+      build-essential cmake ninja-build ccache \
+      python3 python3-venv python3-dev
+
+# Fail fast on the two host anchors that are meaningful inside a container.
+# build-essential on 26.04 provides gcc 15.2, which is exactly the anchor; if a
+# future base image moves off it, this stops the build in seconds instead of
+# after the compile.
+RUN set -eux; \
+    nvcc --version | sed -n 's/.*release \([0-9][0-9]*\)\..*/\1/p' | grep -qx 13; \
+    gcc -dumpversion | grep -qx 15
+
+# uv is a hard requirement of build.sh (it manages the venv, torch, the build
+# tools and the editable vLLM install). The installer handles mirror fallback.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+ && install -m 0755 /root/.local/bin/uv /usr/local/bin/uv \
+ && uv --version
+
+# The Rust frontend (vllm-rs) is an *optional* setuptools-rust extension: it is
+# built when a Rust toolchain is on PATH and silently skipped when it is not.
+# Upstream builds it in a dedicated docker/Dockerfile stage, so install rustup
+# here to keep this image on the same feature set. The toolchain version is
+# pinned by rust-toolchain.toml and installed on demand by the rustup shim.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain none \
+ && rustup --version
+
+# Ubuntu 26.04 has glibc >= 2.41, where CUDA's <crt/math_functions.h> declares
+# rsqrt/rsqrtf without the exception specifier modern glibc expects, which
+# breaks C++ compilation. The repository ships the fix, but its header paths are
+# written for cuda-13.0, so they are retargeted to this image's CUDA directory.
+# Applied only if the headers do not already carry the fix (idempotent), and
+# verified with the same two markers build.sh's own check looks for.
+COPY toolchain-patches/ /tmp/toolchain-patches/
+RUN set -eux; \
+    header=/usr/local/cuda/targets/x86_64-linux/include/crt/math_functions.h; \
+    if grep -q '__GLIBC_PREREQ(2,41)' "$header" && grep -q '_NV_RSQRT_SPECIFIER' "$header"; then \
+      echo "CUDA headers already carry the glibc >= 2.41 rsqrt fix; patch not needed"; \
+    else \
+      sed 's|cuda-13\.0|cuda-13.3|g' \
+          /tmp/toolchain-patches/cuda-13.0-glibc-2.41-rsqrt.patch \
+        | patch -p1 -d / --fuzz=3; \
+    fi; \
+    grep -q '__GLIBC_PREREQ(2,41)' "$header"; \
+    grep -q '_NV_RSQRT_SPECIFIER'  "$header"; \
+    grep -q '_NV_RSQRT_SPECIFIER' \
+      /usr/local/cuda/targets/x86_64-linux/include/crt/math_functions.hpp; \
+    rm -rf /tmp/toolchain-patches
+
+WORKDIR /workspace
+COPY . .
+
+# build.sh waits for a confirmation prompt before it starts; there is no TTY
+# here. ALLOW_HOST_MISMATCH only relaxes the container-meaningless kernel check
+# — see the header — the other two anchors were re-asserted above.
+# TORCH_CUDA_ARCH_LIST is intentionally left alone: build.sh defaults it to 7.5,
+# so only SM75 kernels are built.
+ENV ASSUME_YES=1 \
+    ALLOW_HOST_MISMATCH=1
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    ./build.sh
+
+# VCS metadata is not needed at runtime. build.sh resolves the version during
+# the wheel build (and writes vllm/_version.py), so dropping .git afterwards
+# only removes weight from the final image.
+RUN rm -rf /workspace/.git
+
+# The build log build.sh leaves behind is kept on purpose: it is the only
+# in-image record of the toolchain and site-packages versions that were used.
+
+# ─────────────────────────────── runtime ───────────────────────────────
+FROM nvidia/cuda:13.3.0-runtime-ubuntu26.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# python3 (not the venv) is required: launcher.sh shells out to `python3` for its
+# inline JSON helpers. curl is required for its API/health probes. libnuma1 and
+# libibverbs1 back the NCCL runtime used by tensor parallelism. The remaining
+# entries mirror the upstream runtime image so multimodal models keep working.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl python3 \
+      libnuma1 libibverbs1 \
+      ffmpeg libsm6 libxext6 libgl1
+
+WORKDIR /workspace
+# build.sh keeps everything inside the source tree: .venv, the uv-managed
+# CPython, the compiled vllm package, the .deps checkouts (FlashQLA is an
+# editable install) and the FlashQLA SM75 extension. Copying the whole tree is
+# what keeps the venv's absolute paths valid.
+COPY --from=builder /workspace /workspace
+
+ENV PATH=/workspace/.venv/bin:$PATH \
+    CUDA_HOME=/usr/local/cuda \
+    UV_PYTHON_INSTALL_DIR=/workspace/.uv/python \
+    VLLM_TARGET_DEVICE=cuda \
+    VLLM_MAIN_CUDA_VERSION=cu130
+
+# Weights are mounted at runtime, never baked in.
+VOLUME ["/models"]
+EXPOSE 8000
+
+# launcher.sh selects the target/draft checkpoints, applies a profile, resolves
+# FlashQLA_ROOT under RUNTIME_ROOT (= the directory it lives in) and configures
+# the GPU/TP topology. It is interactive by default; pass NON_INTERACTIVE=1 plus
+# MODEL_DIR / PROFILE / GPU_DEVICES / TP_SIZE to automate.
+ENTRYPOINT ["./launcher.sh"]
