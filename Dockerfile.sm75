@@ -260,4 +260,17 @@ EXPOSE 8000
 # FlashQLA_ROOT under RUNTIME_ROOT (= the directory it lives in) and configures
 # the GPU/TP topology. It is interactive by default; pass NON_INTERACTIVE=1 plus
 # MODEL_DIR / PROFILE / GPU_DEVICES / TP_SIZE to automate.
-ENTRYPOINT ["./launcher.sh"]
+#
+# The entrypoint is the foreground wrapper, not launcher.sh itself: as PID 1 the
+# launcher would exit right after starting api_server (it detaches it with
+# nohup+setsid) and the container would be recreated in a loop. The wrapper
+# forwards its arguments to launcher.sh and then holds the foreground until that
+# server exits, so `docker run <image> <launcher options>` behaves like a normal
+# service container. Use --entrypoint ./launcher.sh for the interactive manager.
+COPY entrypoint.sm75.sh /workspace/entrypoint.sm75.sh
+# chmod for checkouts that do not carry the executable bit; the sed strips CR so
+# a CRLF checkout (git on Windows without .gitattributes) cannot break the script.
+RUN chmod +x /workspace/entrypoint.sm75.sh \
+ && sed -i 's/\r$//' /workspace/entrypoint.sm75.sh
+
+ENTRYPOINT ["/workspace/entrypoint.sm75.sh"]
