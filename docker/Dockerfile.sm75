@@ -267,10 +267,10 @@ EXPOSE 8000
 # forwards its arguments to launcher.sh and then holds the foreground until that
 # server exits, so `docker run <image> <launcher options>` behaves like a normal
 # service container. Use --entrypoint ./launcher.sh for the interactive manager.
-COPY entrypoint.sm75.sh /workspace/entrypoint.sm75.sh
+COPY docker/entrypoints/vllm-sm75-entrypoint.sh /workspace/vllm-sm75-entrypoint.sh
 # chmod for checkouts that do not carry the executable bit; the sed strips CR so
 # a CRLF checkout (git on Windows without .gitattributes) cannot break the script.
-RUN chmod +x /workspace/entrypoint.sm75.sh \
- && sed -i 's/\r$//' /workspace/entrypoint.sm75.sh
+RUN chmod +x /workspace/vllm-sm75-entrypoint.sh \
+ && sed -i 's/\r$//' /workspace/vllm-sm75-entrypoint.sh
 
-ENTRYPOINT ["/workspace/entrypoint.sm75.sh"]
+ENTRYPOINT ["/workspace/vllm-sm75-entrypoint.sh"]

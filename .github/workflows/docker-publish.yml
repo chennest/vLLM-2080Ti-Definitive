@@ -8,11 +8,11 @@
 #   mirror-aware dependency fetch — a significant setup cost for every Turing
 #   user (T10 / T4 / 2080 Ti). A prebuilt image removes it.
 # * There was no CI in this repository, so nothing built or published the image
-#   Dockerfile.sm75 describes.
+#   docker/Dockerfile.sm75 describes.
 #
 # Three details that must not be "simplified" away
 # -----------------------------------------------
-# 1. The image is built from Dockerfile.sm75, which drives build.sh — the
+# 1. The image is built from docker/Dockerfile.sm75, which drives build.sh — the
 #    project's supported build path. That is what fetches and compiles the
 #    FlashQLA SM70/SM75 legacy GDN kernels and what defaults TORCH_CUDA_ARCH_LIST
 #    to 7.5. Building docker/Dockerfile instead skips both.
@@ -118,7 +118,7 @@ jobs:
           # GDN kernels (required by Qwen3.8 on Turing) and pins
           # TORCH_CUDA_ARCH_LIST to 7.5 by default, so only SM75 kernels are
           # built.
-          file: Dockerfile.sm75
+          file: docker/Dockerfile.sm75
           target: runtime
           push: ${{ startsWith(github.ref, 'refs/tags/') || inputs.push_image }}
           tags: ${{ steps.meta.outputs.tags }}
