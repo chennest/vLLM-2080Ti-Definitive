@@ -200,7 +200,22 @@ RUN rm -rf /workspace/.git
 # in-image record of the toolchain and site-packages versions that were used.
 
 # ─────────────────────────────── runtime ───────────────────────────────
-FROM nvidia/cuda:13.3.0-runtime-ubuntu26.04 AS runtime
+FROM nvidia/cuda:13.3.0-devel-ubuntu26.04 AS runtime
+
+# The runtime stage keeps the -devel CUDA base on purpose: this stack compiles
+# kernels at *runtime*, not only at build time, and the -runtime base carries no
+# compiler and no CUDA development headers.
+#   * Triton JITs its kernels on first use and shells out to a C compiler
+#     ("Failed to find C compiler" without gcc).
+#   * FlashInfer generates and compiles prefill kernels per shape/KV dtype
+#     (needs nvcc plus headers, e.g. cusparse.h via ATen/cuda/CUDAContextLight.h).
+#   * FlashQLA builds its SM75 extension through torch's extension loader, whose
+#     cached build directory is only reusable when the headers it depends on
+#     exist.
+# Using the same base as the builder stage also keeps those headers at the same
+# version (and older mtimes) as the objects compiled in the builder, so the
+# cached FlashQLA build stays valid. Upstream runs build.sh on a machine with a
+# full toolchain, which is why a -runtime image never had to satisfy this.
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -215,7 +230,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get install -y --no-install-recommends \
       ca-certificates curl python3 \
       libnuma1 libibverbs1 \
-      ffmpeg libsm6 libxext6 libgl1
+      ffmpeg libsm6 libxext6 libgl1 \
+      gcc libc6-dev
+
+# gcc + libc6-dev are runtime dependencies, not build leftovers: vLLM JIT-compiles
+# its Triton kernels on first use, and Triton shells out to a C compiler to link
+# the launcher. Ask for them explicitly instead of relying on the base image to
+# provide a host compiler; source checkouts never hit this because build.sh runs
+# on a machine with a full toolchain.
 
 WORKDIR /workspace
 # build.sh keeps everything inside the source tree: .venv, the uv-managed
