@@ -1,3 +1,12 @@
+# VCS and CI metadata change on every checkout (packfile layout, refs, logs,
+# FETCH_HEAD), so leaving them in the context makes `COPY . .` hash differently
+# on every run and silently invalidates every later layer -- including the
+# ~20 minute build.sh layer. build.sh handles a context without .git (it falls
+# back to BASE_VLLM_VERSION for the package version), and Dockerfile.sm75 pins
+# SETUPTOOLS_SCM_PRETEND_VERSION explicitly, so neither is needed at build time.
+/.git
+/.github
+
 /.venv
 /build
 /artifacts/vllm-rocm-install/
