@@ -169,14 +169,14 @@ ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs \
 #
 # raised from vcs_versioning/_scm_version.py meta(). Pin the version instead, so
 # the shape of the published tag is not load-bearing for whether the image
-# builds. The default is the project's own fallback_version from pyproject.toml
-# ([tool.setuptools_scm]) — the same value build.sh exports when it finds a
-# source snapshot without usable VCS metadata. Override the ARG to stamp a
-# different version (VLLM_VERSION_OVERRIDE is not used here because it would
-# only be honoured by setup.py, not by build.sh's own version exports).
-ARG VLLM_VERSION=0.2.2.post1+2080ti
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VLLM_VERSION} \
-    SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM=${VLLM_VERSION}
+# builds. The value is resolved in the build step below from the project's own
+# [tool.setuptools_scm] fallback_version in pyproject.toml — the same value
+# build.sh exports for a source snapshot without usable VCS metadata. Upstream
+# bumps that field on every release, so nothing here needs editing when the base
+# moves. Pass --build-arg VLLM_VERSION=... to stamp a different version
+# (VLLM_VERSION_OVERRIDE is not used here because it would only be honoured by
+# setup.py, not by build.sh's own version exports).
+ARG VLLM_VERSION
 
 # build.sh waits for a confirmation prompt before it starts; there is no TTY
 # here. ALLOW_HOST_MISMATCH only relaxes the container-meaningless kernel check
@@ -189,6 +189,12 @@ ENV ASSUME_YES=1 \
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    set -eu; \
+    version="${VLLM_VERSION:-$(sed -n 's/^fallback_version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' pyproject.toml)}"; \
+    test -n "$version"; \
+    export SETUPTOOLS_SCM_PRETEND_VERSION="$version"; \
+    export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="$version"; \
+    echo "Pinned vLLM version: $version"; \
     ./build.sh
 
 # VCS metadata is not needed at runtime. build.sh resolves the version during
