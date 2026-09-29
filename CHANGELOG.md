@@ -2,6 +2,23 @@
 
 This changelog tracks releases of vLLM 2080 Ti Definitive Edition separately from upstream vLLM releases.
 
+## v0.2.2-post2 - 2026-09-26
+
+Patch release following `v0.2.2-post1`. This release further strengthens
+DFlash2 prefix-cache replay and target-state handling.
+
+### DFlash2 prefix cache and target state
+
+- Retains DFlash2 target replay state across prefix-cache reuse and alternating
+  prefill/decode requests, so reusable target state is not lost between turns.
+- Restores the configured target Mamba speculative state pages for DFlash2 and
+  DSpark while keeping draft KV pages in their independent pools.
+- Accounts for the resident replay and hashed-boundary pages together with the
+  target speculative pages in Mamba align mode, keeping target block tables and
+  KV capacity consistent during speculative replay.
+- Adds regression coverage for prefix-cache replay and DFlash target state
+  sizing and accounting.
+
 ## v0.2.2-post1 - 2026-09-26
 
 Patch release following `v0.2.2`, based on the latest `main` runtime.
